@@ -543,133 +543,104 @@ async function getAIResponse(userInput, chatHistory) {
   }
 }
 
-// Function to transcribe voice message using Groq Whisper (Free & Fast)
+// Function to transcribe voice message using Deepgram (100% FREE - No credit card!)
 async function transcribeVoice(audioBuffer, fileExtension = 'oga') {
-  try {
-    const GROQ_API_KEY = process.env.GROQ_API_KEY || 'gsk_free_trial_key'; // Free tier available
-    
-    // Create form data
-    const form = new FormData();
-    form.append('file', audioBuffer, {
-      filename: `audio.${fileExtension}`,
-      contentType: 'audio/ogg'
-    });
-    form.append('model', 'whisper-large-v3');
-    form.append('language', 'auto'); // Auto-detect language (English, Persian, etc.)
-    form.append('response_format', 'json');
-
-    // Send to Groq API
-    const response = await axios.post('https://api.groq.com/openai/v1/audio/transcriptions', form, {
-      headers: {
-        ...form.getHeaders(),
-        'Authorization': `Bearer ${GROQ_API_KEY}`
-      },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity
-    });
-
-    return response.data.text || '';
-  } catch (error) {
-    console.error('❌ Groq transcription error:', error.message);
-    
-    // Fallback: Try using HuggingFace with different approach
-    try {
-      // Convert audio to base64 and use HF inference API directly
-      const base64Audio = audioBuffer.toString('base64');
-      
-      const response = await axios.post(
-        'https://api-inference.huggingface.co/models/openai/whisper-large-v3',
-        audioBuffer,
-        {
-          headers: {
-            'Authorization': `Bearer ${process.env.HF_API_KEY}`,
-            'Content-Type': 'audio/ogg'
-          }
-        }
-      );
-      
-      return response.data.text || '';
-    } catch (hfError) {
-      console.error('❌ HuggingFace fallback failed:', hfError.message);
-      
-      // Last resort: Use AssemblyAI (also has free tier)
-      try {
-        return await transcribeWithAssemblyAI(audioBuffer);
-      } catch (assemblyError) {
-        console.error('❌ All transcription methods failed');
-        return null;
-      }
-    }
+  const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
+  
+  if (!DEEPGRAM_API_KEY) {
+    console.error('❌ DEEPGRAM_API_KEY not set. Please add it to environment variables.');
+    console.log('📝 Get free key at: https://console.deepgram.com/signup');
+    return '❌ Voice transcription not configured. Please contact administrator.';
   }
-}
 
-// Fallback: AssemblyAI transcription (free tier)
-async function transcribeWithAssemblyAI(audioBuffer) {
   try {
-    const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY || 'free_trial_key';
+    console.log('🎤 Using Deepgram for transcription...');
     
-    // Upload audio file
-    const uploadResponse = await axios.post(
-      'https://api.assemblyai.com/v2/upload',
+    // Deepgram API endpoint
+    const response = await axios.post(
+      'https://api.deepgram.com/v1/listen?model=nova-2&language=multi&detect_language=true',
       audioBuffer,
       {
         headers: {
-          'authorization': ASSEMBLYAI_API_KEY,
-          'content-type': 'application/octet-stream'
+          'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+          'Content-Type': 'audio/ogg'
         }
       }
     );
 
-    const audioUrl = uploadResponse.data.upload_url;
-
-    // Request transcription
-    const transcriptResponse = await axios.post(
-      'https://api.assemblyai.com/v2/transcript',
-      {
-        audio_url: audioUrl,
-        language_detection: true // Auto-detect language
-      },
-      {
-        headers: {
-          'authorization': ASSEMBLYAI_API_KEY,
-          'content-type': 'application/json'
-        }
-      }
-    );
-
-    const transcriptId = transcriptResponse.data.id;
-
-    // Poll for completion
-    let transcript;
-    let attempts = 0;
-    while (attempts < 30) { // Max 30 seconds
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      const pollResponse = await axios.get(
-        `https://api.assemblyai.com/v2/transcript/${transcriptId}`,
-        {
-          headers: {
-            'authorization': ASSEMBLYAI_API_KEY
-          }
-        }
-      );
-
-      transcript = pollResponse.data;
-      
-      if (transcript.status === 'completed') {
-        return transcript.text;
-      } else if (transcript.status === 'error') {
-        throw new Error('Transcription failed');
-      }
-      
-      attempts++;
+    const transcript = response.data?.results?.channels?.[0]?.alternatives?.[0]?.transcript;
+    
+    if (transcript) {
+      console.log('✅ Deepgram transcription successful');
+      return transcript;
     }
-
-    throw new Error('Transcription timeout');
+    
+    throw new Error('No transcript in response');
   } catch (error) {
-    console.error('❌ AssemblyAI error:', error.message);
+    console.error('❌ Deepgram error:', error.response?.data || error.message);
+    
+    // Fallback: Try Groq if available
+    if (process.env.GROQ_API_KEY) {
+      try {
+        console.log('🔄 Trying Groq fallback...');
+        return await transcribeWithGroq(audioBuffer);
+      } catch (groqError) {
+        console.error('❌ Groq fallback failed:', groqError.message);
+      }
+    }
+    
+    // Last resort: Try HuggingFace
+    if (process.env.HF_API_KEY) {
+      try {
+        console.log('🔄 Trying HuggingFace fallback...');
+        return await transcribeWithHuggingFace(audioBuffer);
+      } catch (hfError) {
+        console.error('❌ HuggingFace fallback failed:', hfError.message);
+      }
+    }
+    
     return null;
   }
+}
+
+// Groq fallback
+async function transcribeWithGroq(audioBuffer) {
+  const form = new FormData();
+  form.append('file', audioBuffer, {
+    filename: 'audio.oga',
+    contentType: 'audio/ogg'
+  });
+  form.append('model', 'whisper-large-v3');
+  form.append('response_format', 'json');
+
+  const response = await axios.post(
+    'https://api.groq.com/openai/v1/audio/transcriptions',
+    form,
+    {
+      headers: {
+        ...form.getHeaders(),
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
+      }
+    }
+  );
+
+  return response.data.text;
+}
+
+// HuggingFace fallback
+async function transcribeWithHuggingFace(audioBuffer) {
+  const response = await axios.post(
+    'https://api-inference.huggingface.co/models/openai/whisper-large-v3',
+    audioBuffer,
+    {
+      headers: {
+        'Authorization': `Bearer ${process.env.HF_API_KEY}`,
+        'Content-Type': 'audio/ogg'
+      }
+    }
+  );
+  
+  return response.data.text;
 }
 
 // Handle voice messages
