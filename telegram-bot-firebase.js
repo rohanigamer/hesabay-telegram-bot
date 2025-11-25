@@ -587,6 +587,19 @@ async function getAIResponse(userInput, chatHistory) {
 
 // Function to transcribe voice message using Deepgram (100% FREE - No credit card!)
 async function transcribeVoice(audioBuffer, userLanguage = 'auto', fileExtension = 'oga') {
+  // For Persian, Urdu, Arabic - use Groq first (better accuracy with Whisper)
+  const preferGroqLanguages = ['fa', 'ur', 'ar'];
+  
+  if (preferGroqLanguages.includes(userLanguage) && process.env.GROQ_API_KEY) {
+    try {
+      console.log(`🎤 Using Groq for ${userLanguage} transcription (better accuracy)...`);
+      return await transcribeWithGroq(audioBuffer, userLanguage);
+    } catch (error) {
+      console.error(`❌ Groq failed for ${userLanguage}, trying Deepgram fallback:`, error.message);
+      // Continue to Deepgram fallback below
+    }
+  }
+  
   const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
   
   if (!DEEPGRAM_API_KEY) {
