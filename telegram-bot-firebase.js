@@ -598,18 +598,48 @@ async function transcribeVoice(audioBuffer, userLanguage = 'auto', fileExtension
   try {
     console.log(`🎤 Using Deepgram for transcription (Language: ${userLanguage})...`);
     
-    // Build API URL with language parameter
-    let apiUrl = 'https://api.deepgram.com/v1/listen?model=nova-2';
+    // Map user language codes to Deepgram supported languages
+    const languageMap = {
+      'fa': 'multi',  // Persian - use multi-language model
+      'ur': 'multi',  // Urdu - use multi-language model
+      'ar': 'multi',  // Arabic - use multi-language model
+      'hi': 'hi',     // Hindi
+      'en': 'en',     // English
+      'es': 'es',     // Spanish
+      'fr': 'fr',     // French
+      'de': 'de',     // German
+      'zh': 'zh',     // Chinese
+      'ja': 'ja',     // Japanese
+      'ko': 'ko',     // Korean
+      'ru': 'ru',     // Russian
+      'tr': 'tr',     // Turkish
+      'auto': 'multi' // Auto-detect
+    };
+    
+    const deepgramLanguage = languageMap[userLanguage] || 'multi';
+    
+    // Build API URL - use base model for better language support
+    let apiUrl = 'https://api.deepgram.com/v1/listen?model=base';
     
     if (userLanguage && userLanguage !== 'auto') {
-      // Force specific language
-      apiUrl += `&language=${userLanguage}`;
-      console.log(`🌍 Forcing language: ${userLanguage}`);
+      // For specific languages, use the mapped language
+      apiUrl += `&language=${deepgramLanguage}`;
+      
+      // Add language hint for better accuracy with multi-language model
+      if (deepgramLanguage === 'multi') {
+        apiUrl += `&detect_language=true`;
+        console.log(`🌍 Using multi-language model with hint: ${userLanguage}`);
+      } else {
+        console.log(`🌍 Forcing language: ${deepgramLanguage}`);
+      }
     } else {
       // Auto-detect language
-      apiUrl += '&language=multi&detect_language=true';
+      apiUrl += '&detect_language=true';
       console.log('🌍 Auto-detecting language');
     }
+    
+    // Add punctuation and smart formatting
+    apiUrl += '&punctuate=true&smart_format=true';
     
     // Deepgram API request
     const response = await axios.post(
