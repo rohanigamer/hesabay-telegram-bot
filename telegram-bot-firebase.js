@@ -595,7 +595,11 @@ async function transcribeVoice(audioBuffer, userLanguage = 'auto', fileExtension
       console.log(`🎤 Using Groq for ${userLanguage} transcription (better accuracy)...`);
       return await transcribeWithGroq(audioBuffer, userLanguage);
     } catch (error) {
-      console.error(`❌ Groq failed for ${userLanguage}, trying Deepgram fallback:`, error.message);
+      console.error(`❌ Groq failed for ${userLanguage}:`, error.message);
+      if (error.response?.data) {
+        console.error('📋 Groq error details:', JSON.stringify(error.response.data));
+      }
+      console.log('🔄 Trying Deepgram fallback...');
       // Continue to Deepgram fallback below
     }
   }
@@ -712,28 +716,31 @@ async function transcribeWithGroq(audioBuffer, userLanguage = 'auto') {
   form.append('model', 'whisper-large-v3');
   form.append('response_format', 'json');
   
-  // Groq Whisper uses ISO 639-1 language codes
-  // For Persian, Urdu, Arabic - don't specify language, let Whisper auto-detect
-  const groqLanguageMap = {
-    'en': 'en',
-    'es': 'es',
-    'fr': 'fr',
-    'de': 'de',
-    'zh': 'zh',
-    'ja': 'ja',
-    'ko': 'ko',
-    'ru': 'ru',
-    'tr': 'tr',
-    'hi': 'hi',
-    'ar': 'ar',  // Arabic is supported
-    'fa': 'fa',  // Persian is supported
-    'ur': 'ur'   // Urdu is supported
+  // Whisper language codes and prompts for better accuracy
+  const languageConfig = {
+    'en': { code: 'en', prompt: 'Transcribe this English audio:' },
+    'es': { code: 'es', prompt: 'Transcribe este audio en español:' },
+    'fr': { code: 'fr', prompt: 'Transcrire cet audio en français:' },
+    'de': { code: 'de', prompt: 'Transkribiere dieses Audio auf Deutsch:' },
+    'zh': { code: 'zh', prompt: '转录这段中文音频：' },
+    'ja': { code: 'ja', prompt: 'この日本語の音声を文字起こしする：' },
+    'ko': { code: 'ko', prompt: '이 한국어 오디오를 전사하세요:' },
+    'ru': { code: 'ru', prompt: 'Транскрибируйте это аудио на русском:' },
+    'tr': { code: 'tr', prompt: 'Bu Türkçe sesi yazıya dökün:' },
+    'hi': { code: 'hi', prompt: 'इस हिंदी ऑडियो को ट्रांसक्राइब करें:' },
+    'ar': { code: 'ar', prompt: 'انسخ هذا الصوت العربي:' },
+    'fa': { code: 'fa', prompt: 'این صدای فارسی را رونویسی کنید: سلام' },  // Persian with hint
+    'ur': { code: 'ur', prompt: 'اس اردو آڈیو کو نقل کریں: سلام' }  // Urdu with hint
   };
   
-  // Add language if specified and supported
-  if (userLanguage && userLanguage !== 'auto' && groqLanguageMap[userLanguage]) {
-    form.append('language', groqLanguageMap[userLanguage]);
-    console.log(`🌍 Groq: Using language ${groqLanguageMap[userLanguage]}`);
+  const config = languageConfig[userLanguage];
+  
+  if (config) {
+    // Add language code
+    form.append('language', config.code);
+    // Add prompt to guide transcription (helps with Persian/Urdu/Arabic)
+    form.append('prompt', config.prompt);
+    console.log(`🌍 Groq: Using language ${config.code} with prompt`);
   } else {
     console.log('🌍 Groq: Auto-detecting language');
   }
