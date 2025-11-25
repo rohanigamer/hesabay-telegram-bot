@@ -9,6 +9,8 @@ const TelegramBot = require('node-telegram-bot-api');
 const { HfInference } = require('@huggingface/inference');
 const admin = require('firebase-admin');
 const cors = require('cors');
+const axios = require('axios');
+const FormData = require('form-data');
 
 // Configuration
 const TELEGRAM_BOT_TOKEN = process.env.BOT_TOKEN;
@@ -381,13 +383,15 @@ bot.onText(/\/help/, async (msg) => {
     `/logout - Disconnect and clear all data\n` +
     `/disconnect - Same as logout\n\n` +
     `💬 *How to Use:*\n` +
-    `• Just send any message to chat with Hesabay AI\n` +
+    `• Send text messages to chat with Hesabay AI\n` +
+    `• 🎤 Send voice messages (English & Persian supported)\n` +
     `• Ask questions about Hesabay features\n` +
-    `• Get help in any language (Persian, English, etc.)\n` +
+    `• Get help in any language\n` +
     `• All chats are saved and synced to the web app\n\n` +
     `🌟 *Features:*\n` +
     `✅ AI-powered responses\n` +
-    `✅ Multi-language support\n` +
+    `✅ Multi-language support (English, Persian, etc.)\n` +
+    `✅ 🎤 Voice message transcription\n` +
     `✅ Chat history saved\n` +
     `✅ Real-time sync with web app\n` +
     `✅ 24/7 availability\n\n` +
@@ -539,9 +543,194 @@ async function getAIResponse(userInput, chatHistory) {
   }
 }
 
+// Function to transcribe voice message using HuggingFace Whisper
+async function transcribeVoice(audioBuffer) {
+  try {
+    const response = await hf.automaticSpeechRecognition({
+      model: 'openai/whisper-large-v3',
+      data: audioBuffer
+    });
+    
+    return response.text || '';
+  } catch (error) {
+    console.error('❌ Transcription error:', error.message);
+    
+    // Try alternative model
+    try {
+      const response = await hf.automaticSpeechRecognition({
+        model: 'openai/whisper-medium',
+        data: audioBuffer
+      });
+      return response.text || '';
+    } catch (altError) {
+      console.error('❌ Alternative transcription failed:', altError.message);
+      return null;
+    }
+  }
+}
+
+// Handle voice messages
+bot.on('voice', async (msg) => {
+  const chatId = msg.chat.id;
+  const telegramUserId = msg.from.id.toString();
+  const voice = msg.voice;
+  
+  console.log(`🎤 Voice message from ${telegramUserId}`);
+  
+  try {
+    // Check if user is connected
+    let appUserId;
+    let accountIndex = 0;
+
+    if (db) {
+      const usersSnapshot = await db.collection('users')
+        .where('telegramConnected', '==', true)
+        .get();
+
+      let foundUser = null;
+      for (const doc of usersSnapshot.docs) {
+        const userData = doc.data();
+        const telegramAccounts = userData.telegramAccounts || [];
+        const accountIdx = telegramAccounts.findIndex(acc => acc.telegramUserId === telegramUserId);
+        
+        if (accountIdx !== -1) {
+          foundUser = doc;
+          accountIndex = accountIdx;
+          break;
+        }
+      }
+
+      if (!foundUser) {
+        await bot.sendMessage(chatId, 
+          `⚠️ Please connect your Hesabay account first!\n\n` +
+          `Use /start with a connection token from the Hesabay app.`
+        );
+        return;
+      }
+
+      appUserId = foundUser.id;
+    }
+
+    // Send processing message
+    const processingMsg = await bot.sendMessage(chatId, 
+      `🎤 Processing your voice message...\n` +
+      `⏳ Transcribing audio...`
+    );
+
+    // Get file from Telegram
+    const fileLink = await bot.getFileLink(voice.file_id);
+    console.log(`📥 Downloading voice from: ${fileLink}`);
+
+    // Download the audio file
+    const audioResponse = await axios.get(fileLink, { responseType: 'arraybuffer' });
+    const audioBuffer = Buffer.from(audioResponse.data);
+
+    // Update message
+    await bot.editMessageText(
+      `🎤 Voice message received!\n` +
+      `🔄 Transcribing... (supports English & Persian)`,
+      { chat_id: chatId, message_id: processingMsg.message_id }
+    );
+
+    // Transcribe the audio
+    const transcribedText = await transcribeVoice(audioBuffer);
+
+    if (!transcribedText) {
+      await bot.editMessageText(
+        `❌ Sorry, I couldn't transcribe your voice message.\n\n` +
+        `Please try:\n` +
+        `• Speaking more clearly\n` +
+        `• Sending a longer message\n` +
+        `• Checking your microphone quality`,
+        { chat_id: chatId, message_id: processingMsg.message_id }
+      );
+      return;
+    }
+
+    console.log(`✅ Transcribed: ${transcribedText}`);
+
+    // Show transcription to user
+    await bot.editMessageText(
+      `✅ Transcribed:\n"${transcribedText}"\n\n` +
+      `🤖 Getting AI response...`,
+      { chat_id: chatId, message_id: processingMsg.message_id }
+    );
+
+    // Get chat history
+    let chatHistory = [];
+    if (db) {
+      const chatRef = db.collection('users').doc(appUserId).collection('telegramChats').doc(`account_${accountIndex}`);
+      const chatDoc = await chatRef.get();
+      
+      if (chatDoc.exists) {
+        chatHistory = chatDoc.data().messages || [];
+      }
+    }
+
+    // Add transcribed message to history
+    const userMsg = {
+      role: 'user',
+      content: transcribedText,
+      type: 'voice'
+    };
+    chatHistory.push(userMsg);
+
+    // Get AI response
+    const aiResponse = await getAIResponse(transcribedText, chatHistory);
+
+    // Add AI response to history
+    const aiMsg = {
+      role: 'assistant',
+      content: aiResponse
+    };
+    chatHistory.push(aiMsg);
+
+    // Save to Firebase
+    if (db) {
+      const chatRef = db.collection('users').doc(appUserId).collection('telegramChats').doc(`account_${accountIndex}`);
+      await chatRef.set({
+        messages: chatHistory.slice(-20),
+        lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastMessage: aiResponse,
+        telegramUserId: telegramUserId,
+        accountIndex: accountIndex
+      }, { merge: true });
+    }
+
+    // Delete processing message
+    await bot.deleteMessage(chatId, processingMsg.message_id);
+
+    // Send transcription and AI response
+    await bot.sendMessage(chatId, 
+      `🎤 *Your voice message:*\n"${transcribedText}"\n\n` +
+      `🤖 *Hesabay AI:*\n${aiResponse}`,
+      { parse_mode: 'Markdown' }
+    );
+
+    console.log(`✅ Voice message processed for ${telegramUserId}`);
+
+  } catch (error) {
+    console.error('❌ Error processing voice:', error);
+    
+    try {
+      await bot.sendMessage(chatId, 
+        `❌ Sorry, I encountered an error processing your voice message.\n\n` +
+        `Please try again or send a text message instead.`
+      );
+    } catch (sendError) {
+      console.error('❌ Error sending error message:', sendError);
+    }
+  }
+});
+
 // Handle all text messages
 bot.on('message', async (msg) => {
   if (msg.text && msg.text.startsWith('/')) {
+    return;
+  }
+  
+  // Skip voice messages (handled separately)
+  if (msg.voice) {
     return;
   }
   
