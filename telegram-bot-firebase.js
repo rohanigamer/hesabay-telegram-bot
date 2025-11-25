@@ -543,29 +543,132 @@ async function getAIResponse(userInput, chatHistory) {
   }
 }
 
-// Function to transcribe voice message using HuggingFace Whisper
-async function transcribeVoice(audioBuffer) {
+// Function to transcribe voice message using Groq Whisper (Free & Fast)
+async function transcribeVoice(audioBuffer, fileExtension = 'oga') {
   try {
-    const response = await hf.automaticSpeechRecognition({
-      model: 'openai/whisper-large-v3',
-      data: audioBuffer
+    const GROQ_API_KEY = process.env.GROQ_API_KEY || 'gsk_free_trial_key'; // Free tier available
+    
+    // Create form data
+    const form = new FormData();
+    form.append('file', audioBuffer, {
+      filename: `audio.${fileExtension}`,
+      contentType: 'audio/ogg'
     });
-    
-    return response.text || '';
+    form.append('model', 'whisper-large-v3');
+    form.append('language', 'auto'); // Auto-detect language (English, Persian, etc.)
+    form.append('response_format', 'json');
+
+    // Send to Groq API
+    const response = await axios.post('https://api.groq.com/openai/v1/audio/transcriptions', form, {
+      headers: {
+        ...form.getHeaders(),
+        'Authorization': `Bearer ${GROQ_API_KEY}`
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
+    });
+
+    return response.data.text || '';
   } catch (error) {
-    console.error('❌ Transcription error:', error.message);
+    console.error('❌ Groq transcription error:', error.message);
     
-    // Try alternative model
+    // Fallback: Try using HuggingFace with different approach
     try {
-      const response = await hf.automaticSpeechRecognition({
-        model: 'openai/whisper-medium',
-        data: audioBuffer
-      });
-      return response.text || '';
-    } catch (altError) {
-      console.error('❌ Alternative transcription failed:', altError.message);
-      return null;
+      // Convert audio to base64 and use HF inference API directly
+      const base64Audio = audioBuffer.toString('base64');
+      
+      const response = await axios.post(
+        'https://api-inference.huggingface.co/models/openai/whisper-large-v3',
+        audioBuffer,
+        {
+          headers: {
+            'Authorization': `Bearer ${process.env.HF_API_KEY}`,
+            'Content-Type': 'audio/ogg'
+          }
+        }
+      );
+      
+      return response.data.text || '';
+    } catch (hfError) {
+      console.error('❌ HuggingFace fallback failed:', hfError.message);
+      
+      // Last resort: Use AssemblyAI (also has free tier)
+      try {
+        return await transcribeWithAssemblyAI(audioBuffer);
+      } catch (assemblyError) {
+        console.error('❌ All transcription methods failed');
+        return null;
+      }
     }
+  }
+}
+
+// Fallback: AssemblyAI transcription (free tier)
+async function transcribeWithAssemblyAI(audioBuffer) {
+  try {
+    const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY || 'free_trial_key';
+    
+    // Upload audio file
+    const uploadResponse = await axios.post(
+      'https://api.assemblyai.com/v2/upload',
+      audioBuffer,
+      {
+        headers: {
+          'authorization': ASSEMBLYAI_API_KEY,
+          'content-type': 'application/octet-stream'
+        }
+      }
+    );
+
+    const audioUrl = uploadResponse.data.upload_url;
+
+    // Request transcription
+    const transcriptResponse = await axios.post(
+      'https://api.assemblyai.com/v2/transcript',
+      {
+        audio_url: audioUrl,
+        language_detection: true // Auto-detect language
+      },
+      {
+        headers: {
+          'authorization': ASSEMBLYAI_API_KEY,
+          'content-type': 'application/json'
+        }
+      }
+    );
+
+    const transcriptId = transcriptResponse.data.id;
+
+    // Poll for completion
+    let transcript;
+    let attempts = 0;
+    while (attempts < 30) { // Max 30 seconds
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      const pollResponse = await axios.get(
+        `https://api.assemblyai.com/v2/transcript/${transcriptId}`,
+        {
+          headers: {
+            'authorization': ASSEMBLYAI_API_KEY
+          }
+        }
+      );
+
+      transcript = pollResponse.data;
+      
+      if (transcript.status === 'completed') {
+        return transcript.text;
+      } else if (transcript.status === 'error') {
+        throw new Error('Transcription failed');
+      }
+      
+      attempts++;
+    }
+
+    throw new Error('Transcription timeout');
+  } catch (error) {
+    console.error('❌ AssemblyAI error:', error.message);
+    return null;
   }
 }
 
