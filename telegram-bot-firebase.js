@@ -623,13 +623,13 @@ async function transcribeVoice(audioBuffer, userLanguage = 'auto', fileExtension
     
     if (userLanguage && userLanguage !== 'auto') {
       // For specific languages, use the mapped language
-      apiUrl += `&language=${deepgramLanguage}`;
-      
-      // Add language hint for better accuracy with multi-language model
       if (deepgramLanguage === 'multi') {
-        apiUrl += `&detect_language=true`;
-        console.log(`🌍 Using multi-language model with hint: ${userLanguage}`);
+        // For multi-language (Persian, Urdu, Arabic), use detect_language without specifying language
+        apiUrl += '&detect_language=true';
+        console.log(`🌍 Using multi-language detection for: ${userLanguage}`);
       } else {
+        // For supported languages, specify the language directly
+        apiUrl += `&language=${deepgramLanguage}`;
         console.log(`🌍 Forcing language: ${deepgramLanguage}`);
       }
     } else {
@@ -699,9 +699,30 @@ async function transcribeWithGroq(audioBuffer, userLanguage = 'auto') {
   form.append('model', 'whisper-large-v3');
   form.append('response_format', 'json');
   
-  // Add language if specified
-  if (userLanguage && userLanguage !== 'auto') {
-    form.append('language', userLanguage);
+  // Groq Whisper uses ISO 639-1 language codes
+  // For Persian, Urdu, Arabic - don't specify language, let Whisper auto-detect
+  const groqLanguageMap = {
+    'en': 'en',
+    'es': 'es',
+    'fr': 'fr',
+    'de': 'de',
+    'zh': 'zh',
+    'ja': 'ja',
+    'ko': 'ko',
+    'ru': 'ru',
+    'tr': 'tr',
+    'hi': 'hi',
+    'ar': 'ar',  // Arabic is supported
+    'fa': 'fa',  // Persian is supported
+    'ur': 'ur'   // Urdu is supported
+  };
+  
+  // Add language if specified and supported
+  if (userLanguage && userLanguage !== 'auto' && groqLanguageMap[userLanguage]) {
+    form.append('language', groqLanguageMap[userLanguage]);
+    console.log(`🌍 Groq: Using language ${groqLanguageMap[userLanguage]}`);
+  } else {
+    console.log('🌍 Groq: Auto-detecting language');
   }
 
   const response = await axios.post(
