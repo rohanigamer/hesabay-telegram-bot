@@ -710,7 +710,7 @@ async function transcribeVoice(audioBuffer, userLanguage = 'auto', fileExtension
 async function transcribeWithGroq(audioBuffer, userLanguage = 'auto') {
   const form = new FormData();
   form.append('file', audioBuffer, {
-    filename: 'audio.oga',
+    filename: 'audio.ogg',  // Changed from .oga to .ogg for Groq compatibility
     contentType: 'audio/ogg'
   });
   form.append('model', 'whisper-large-v3');
