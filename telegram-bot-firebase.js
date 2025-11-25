@@ -90,6 +90,48 @@ app.get('/', (req, res) => {
   res.send('🤖 Hesabay AI Bot is running! Made by Baitullah Rohani 💙');
 });
 
+// API endpoint to update language preference
+app.post('/api/update-language', async (req, res) => {
+  try {
+    const { userId, telegramUserId, language } = req.body;
+    
+    if (!userId || !telegramUserId || !language) {
+      return res.status(400).json({ error: 'User ID, Telegram User ID, and language required' });
+    }
+
+    if (db) {
+      const userDoc = await db.collection('users').doc(userId).get();
+      
+      if (!userDoc.exists) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      const userData = userDoc.data();
+      let telegramAccounts = userData.telegramAccounts || [];
+      
+      // Update the specific account's language
+      telegramAccounts = telegramAccounts.map(acc => 
+        acc.telegramUserId === telegramUserId 
+          ? { ...acc, voiceLanguage: language }
+          : acc
+      );
+      
+      // Update user document
+      await userDoc.ref.update({
+        telegramAccounts: telegramAccounts
+      });
+      
+      console.log(`✅ Updated language to ${language} for user ${telegramUserId}`);
+      res.json({ success: true, message: 'Language updated successfully' });
+    } else {
+      res.json({ success: false, message: 'Database not available' });
+    }
+  } catch (error) {
+    console.error('❌ Error updating language:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // API endpoint to disconnect a specific account
 app.post('/api/disconnect-account', async (req, res) => {
   try {
@@ -544,7 +586,7 @@ async function getAIResponse(userInput, chatHistory) {
 }
 
 // Function to transcribe voice message using Deepgram (100% FREE - No credit card!)
-async function transcribeVoice(audioBuffer, fileExtension = 'oga') {
+async function transcribeVoice(audioBuffer, userLanguage = 'auto', fileExtension = 'oga') {
   const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
   
   if (!DEEPGRAM_API_KEY) {
@@ -554,11 +596,24 @@ async function transcribeVoice(audioBuffer, fileExtension = 'oga') {
   }
 
   try {
-    console.log('🎤 Using Deepgram for transcription...');
+    console.log(`🎤 Using Deepgram for transcription (Language: ${userLanguage})...`);
     
-    // Deepgram API endpoint
+    // Build API URL with language parameter
+    let apiUrl = 'https://api.deepgram.com/v1/listen?model=nova-2';
+    
+    if (userLanguage && userLanguage !== 'auto') {
+      // Force specific language
+      apiUrl += `&language=${userLanguage}`;
+      console.log(`🌍 Forcing language: ${userLanguage}`);
+    } else {
+      // Auto-detect language
+      apiUrl += '&language=multi&detect_language=true';
+      console.log('🌍 Auto-detecting language');
+    }
+    
+    // Deepgram API request
     const response = await axios.post(
-      'https://api.deepgram.com/v1/listen?model=nova-2&language=multi&detect_language=true',
+      apiUrl,
       audioBuffer,
       {
         headers: {
@@ -569,9 +624,10 @@ async function transcribeVoice(audioBuffer, fileExtension = 'oga') {
     );
 
     const transcript = response.data?.results?.channels?.[0]?.alternatives?.[0]?.transcript;
+    const detectedLanguage = response.data?.results?.channels?.[0]?.detected_language;
     
     if (transcript) {
-      console.log('✅ Deepgram transcription successful');
+      console.log(`✅ Deepgram transcription successful (Detected: ${detectedLanguage || userLanguage})`);
       return transcript;
     }
     
@@ -583,7 +639,7 @@ async function transcribeVoice(audioBuffer, fileExtension = 'oga') {
     if (process.env.GROQ_API_KEY) {
       try {
         console.log('🔄 Trying Groq fallback...');
-        return await transcribeWithGroq(audioBuffer);
+        return await transcribeWithGroq(audioBuffer, userLanguage);
       } catch (groqError) {
         console.error('❌ Groq fallback failed:', groqError.message);
       }
@@ -604,7 +660,7 @@ async function transcribeVoice(audioBuffer, fileExtension = 'oga') {
 }
 
 // Groq fallback
-async function transcribeWithGroq(audioBuffer) {
+async function transcribeWithGroq(audioBuffer, userLanguage = 'auto') {
   const form = new FormData();
   form.append('file', audioBuffer, {
     filename: 'audio.oga',
@@ -612,6 +668,11 @@ async function transcribeWithGroq(audioBuffer) {
   });
   form.append('model', 'whisper-large-v3');
   form.append('response_format', 'json');
+  
+  // Add language if specified
+  if (userLanguage && userLanguage !== 'auto') {
+    form.append('language', userLanguage);
+  }
 
   const response = await axios.post(
     'https://api.groq.com/openai/v1/audio/transcriptions',
@@ -652,9 +713,10 @@ bot.on('voice', async (msg) => {
   console.log(`🎤 Voice message from ${telegramUserId}`);
   
   try {
-    // Check if user is connected
+    // Check if user is connected and get language preference
     let appUserId;
     let accountIndex = 0;
+    let userLanguage = 'auto'; // Default to auto-detect
 
     if (db) {
       const usersSnapshot = await db.collection('users')
@@ -662,6 +724,7 @@ bot.on('voice', async (msg) => {
         .get();
 
       let foundUser = null;
+      let userAccount = null;
       for (const doc of usersSnapshot.docs) {
         const userData = doc.data();
         const telegramAccounts = userData.telegramAccounts || [];
@@ -670,6 +733,9 @@ bot.on('voice', async (msg) => {
         if (accountIdx !== -1) {
           foundUser = doc;
           accountIndex = accountIdx;
+          userAccount = telegramAccounts[accountIdx];
+          // Get user's language preference
+          userLanguage = userAccount.voiceLanguage || 'auto';
           break;
         }
       }
@@ -683,6 +749,7 @@ bot.on('voice', async (msg) => {
       }
 
       appUserId = foundUser.id;
+      console.log(`🌍 User language preference: ${userLanguage}`);
     }
 
     // Send processing message
@@ -706,8 +773,8 @@ bot.on('voice', async (msg) => {
       { chat_id: chatId, message_id: processingMsg.message_id }
     );
 
-    // Transcribe the audio
-    const transcribedText = await transcribeVoice(audioBuffer);
+    // Transcribe the audio with user's language preference
+    const transcribedText = await transcribeVoice(audioBuffer, userLanguage);
 
     if (!transcribedText) {
       await bot.editMessageText(
