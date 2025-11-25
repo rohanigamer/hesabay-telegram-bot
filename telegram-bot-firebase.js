@@ -420,18 +420,26 @@ bot.onText(/\/help/, async (msg) => {
     `📱 *Available Commands:*\n\n` +
     `/start - Connect your Hesabay account\n` +
     `/help - Show this help message\n` +
+    `/agent [task] - 🚀 AI Agent for automation\n` +
     `/stats - View your account statistics\n` +
     `/clear - Clear your chat history\n` +
     `/logout - Disconnect and clear all data\n` +
     `/disconnect - Same as logout\n\n` +
+    `🤖 *AI Agent Examples:*\n` +
+    `• /agent add customer John, phone 123\n` +
+    `• /agent receive 10g 22k gold from Ahmad\n` +
+    `• /agent send $500 to Sara\n` +
+    `• /agent buy 5g gold at rate 85 from Hassan\n\n` +
     `💬 *How to Use:*\n` +
     `• Send text messages to chat with Hesabay AI\n` +
     `• 🎤 Send voice messages (English & Persian supported)\n` +
     `• Ask questions about Hesabay features\n` +
+    `• Use /agent for automated tasks\n` +
     `• Get help in any language\n` +
     `• All chats are saved and synced to the web app\n\n` +
     `🌟 *Features:*\n` +
     `✅ AI-powered responses\n` +
+    `✅ 🤖 AI Agents for task automation\n` +
     `✅ Multi-language support (English, Persian, etc.)\n` +
     `✅ 🎤 Voice message transcription\n` +
     `✅ Chat history saved\n` +
@@ -537,6 +545,208 @@ bot.onText(/\/stats/, async (msg) => {
     await bot.sendMessage(chatId, `❌ Error getting stats. Please try again.`);
   }
 });
+
+// Handle /agent command - AI Agents for task automation
+bot.onText(/\/agent (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const telegramUserId = msg.from.id.toString();
+  const userInput = match[1];
+  
+  try {
+    // Check if user is connected
+    if (!db) {
+      await bot.sendMessage(chatId, `❌ Agent feature requires database connection.`);
+      return;
+    }
+
+    const usersSnapshot = await db.collection('users')
+      .where('telegramUserId', '==', telegramUserId)
+      .limit(1)
+      .get();
+
+    if (usersSnapshot.empty) {
+      await bot.sendMessage(chatId, `⚠️ Please connect your account first using /start`);
+      return;
+    }
+
+    const userDoc = usersSnapshot.docs[0];
+    const appUserId = userDoc.id;
+
+    // Send processing message
+    const processingMsg = await bot.sendMessage(chatId, `🤖 Agent processing: "${userInput}"\n\n⏳ Please wait...`);
+
+    // Try to parse the request with AI
+    const agentSystemPrompt = `You are an AI agent that extracts structured data from user requests. Analyze the user's request and return ONLY a JSON object with one of these actions:
+
+1. Add Customer: {"action": "add_customer", "data": {"name": "name", "phone": "phone", "address": "address"}}
+2. Gold Transaction: {"action": "add_gold_transaction", "data": {"customerName": "name", "type": "receive/send", "amount": number, "karat": number, "description": "desc"}}
+3. Money Transaction: {"action": "add_money_transaction", "data": {"customerName": "name", "type": "receive/send", "amount": number, "currency": "USD/AFN/etc", "description": "desc"}}
+4. Buy/Sell: {"action": "buy_sell_gold", "data": {"customerName": "name", "mode": "buy/sale", "amount": number, "rate": number, "currency": "USD", "description": "desc"}}
+
+If the request doesn't match any action, return: {"action": "none", "message": "Could not understand request"}`;
+
+    const chatCompletion = await hf.chatCompletion({
+      model: 'deepseek-ai/DeepSeek-V3',
+      messages: [
+        { role: 'system', content: agentSystemPrompt },
+        { role: 'user', content: userInput }
+      ],
+      temperature: 0.3,
+      max_tokens: 500
+    });
+
+    const aiResponse = chatCompletion.choices[0].message.content.trim();
+    console.log('🤖 Agent AI Response:', aiResponse);
+
+    // Parse JSON response
+    let parsedData;
+    try {
+      const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        parsedData = JSON.parse(jsonMatch[0]);
+      } else {
+        throw new Error('No JSON found in response');
+      }
+    } catch (parseError) {
+      await bot.editMessageText(
+        `❌ Failed to parse request.\n\n` +
+        `Please try a clearer command like:\n` +
+        `• /agent add customer John, phone 123, address Kabul\n` +
+        `• /agent receive 10g 22k gold from Ahmad\n` +
+        `• /agent send $500 to Sara`,
+        { chat_id: chatId, message_id: processingMsg.message_id }
+      );
+      return;
+    }
+
+    // Check if action is valid
+    if (parsedData.action === 'none') {
+      await bot.editMessageText(
+        `❌ ${parsedData.message || 'Could not understand request'}\n\n` +
+        `Try:\n` +
+        `• /agent add customer [name]\n` +
+        `• /agent [receive/send] [amount]g [karat]k gold from/to [customer]\n` +
+        `• /agent [receive/send] $[amount] from/to [customer]`,
+        { chat_id: chatId, message_id: processingMsg.message_id }
+      );
+      return;
+    }
+
+    // Execute the action
+    const result = await executeAgentAction(parsedData, appUserId);
+
+    await bot.editMessageText(
+      `✅ ${result.message}\n\n` +
+        `📊 Details:\n` +
+        `\`\`\`json\n${JSON.stringify(parsedData.data, null, 2)}\n\`\`\``,
+      { chat_id: chatId, message_id: processingMsg.message_id, parse_mode: 'Markdown' }
+    );
+
+  } catch (error) {
+    console.error('❌ Agent error:', error);
+    await bot.sendMessage(chatId, `❌ Error: ${error.message}`);
+  }
+});
+
+// Execute agent action
+async function executeAgentAction(parsedData, appUserId) {
+  const { action, data } = parsedData;
+
+  switch (action) {
+    case 'add_customer':
+      await db.collection('customers').add({
+        name: data.name,
+        phone: data.phone || '',
+        address: data.address || '',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: 'telegram_agent'
+      });
+      return { message: `Customer "${data.name}" added successfully!` };
+    
+    case 'add_gold_transaction':
+      const goldCustomer = await findCustomerByName(data.customerName);
+      if (!goldCustomer) {
+        throw new Error(`Customer "${data.customerName}" not found. Add customer first.`);
+      }
+      await db.collection('customers').doc(goldCustomer.id).collection('goldTransactions').add({
+        type: data.type,
+        amount: parseFloat(data.amount),
+        karat: parseFloat(data.karat),
+        description: data.description || '',
+        date: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: 'telegram_agent'
+      });
+      return { message: `Gold transaction for "${data.customerName}" added!` };
+    
+    case 'add_money_transaction':
+      const moneyCustomer = await findCustomerByName(data.customerName);
+      if (!moneyCustomer) {
+        throw new Error(`Customer "${data.customerName}" not found. Add customer first.`);
+      }
+      await db.collection('customers').doc(moneyCustomer.id).collection('moneyTransactions').add({
+        type: data.type,
+        amount: parseFloat(data.amount),
+        currency: data.currency.toUpperCase(),
+        description: data.description || '',
+        date: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: 'telegram_agent'
+      });
+      return { message: `Money transaction for "${data.customerName}" added!` };
+    
+    case 'buy_sell_gold':
+      const buySellCustomer = await findCustomerByName(data.customerName);
+      if (!buySellCustomer) {
+        throw new Error(`Customer "${data.customerName}" not found. Add customer first.`);
+      }
+      const amount = parseFloat(data.amount);
+      const rate = parseFloat(data.rate);
+      const totalMoney = (amount * rate) / 12.15;
+      
+      const customerDoc = await db.collection('customers').doc(buySellCustomer.id).get();
+      const divisor = customerDoc.data()?.goldPurityDivisor || '23.88';
+      
+      const goldDocRef = await db.collection('customers').doc(buySellCustomer.id).collection('goldTransactions').add({
+        type: data.mode === 'buy' ? 'send' : 'receive',
+        amount: amount,
+        karat: parseFloat(divisor),
+        description: `${data.mode === 'buy' ? 'Bought' : 'Sold'} ${amount}g at rate ${rate}`,
+        date: admin.firestore.FieldValue.serverTimestamp(),
+        createdBy: 'telegram_agent'
+      });
+      
+      await db.collection('customers').doc(buySellCustomer.id).collection('moneyTransactions').add({
+        type: data.mode === 'buy' ? 'receive' : 'send',
+        amount: totalMoney,
+        currency: data.currency?.toUpperCase() || 'USD',
+        description: `${data.mode === 'buy' ? 'Bought' : 'Sold'} ${amount}g at rate ${rate}`,
+        date: admin.firestore.FieldValue.serverTimestamp(),
+        linkedGoldTransactionId: goldDocRef.id,
+        includeSalary: true,
+        salaryAmount: amount,
+        createdBy: 'telegram_agent'
+      });
+      return { message: `Buy/Sell transaction for "${data.customerName}" completed!` };
+    
+    default:
+      throw new Error('Unknown action: ' + action);
+  }
+}
+
+// Find customer by name (fuzzy match)
+async function findCustomerByName(name) {
+  const customersSnapshot = await db.collection('customers').get();
+  const nameLower = name.toLowerCase().trim();
+  
+  for (const doc of customersSnapshot.docs) {
+    const customerName = doc.data().name.toLowerCase();
+    if (customerName.includes(nameLower) || nameLower.includes(customerName)) {
+      return { id: doc.id, ...doc.data() };
+    }
+  }
+  
+  return null;
+}
 
 // Get AI response
 async function getAIResponse(userInput, chatHistory) {
@@ -1069,4 +1279,3 @@ app.listen(PORT, async () => {
 setInterval(() => {
   console.log(`📊 Active users: ${userSessions.size}, Active chats: ${chatHistories.size}`);
 }, 60000);
-
