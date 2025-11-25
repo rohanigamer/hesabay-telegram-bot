@@ -297,7 +297,7 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
           telegramChatId: chatId.toString(),
           telegramUsername: msg.from.username || '',
           telegramFirstName: userName,
-          connectedAt: admin.firestore.FieldValue.serverTimestamp(),
+          connectedAt: new Date().toISOString(),
           isPrimary: telegramAccounts.length === 0 // First account is primary
         });
 
