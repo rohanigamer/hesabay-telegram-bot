@@ -88,6 +88,50 @@ app.get('/', (req, res) => {
   res.send('🤖 Hesabay AI Bot is running! Made by Baitullah Rohani 💙');
 });
 
+// API endpoint to disconnect a specific account
+app.post('/api/disconnect-account', async (req, res) => {
+  try {
+    const { userId, telegramUserId } = req.body;
+    
+    if (!userId || !telegramUserId) {
+      return res.status(400).json({ error: 'User ID and Telegram User ID required' });
+    }
+
+    if (db) {
+      const userDoc = await db.collection('users').doc(userId).get();
+      
+      if (!userDoc.exists) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      const userData = userDoc.data();
+      let telegramAccounts = userData.telegramAccounts || [];
+      
+      // Remove the specific account
+      telegramAccounts = telegramAccounts.filter(acc => acc.telegramUserId !== telegramUserId);
+      
+      // Update user document
+      await userDoc.ref.update({
+        telegramAccounts: telegramAccounts,
+        telegramConnected: telegramAccounts.length > 0
+      });
+      
+      // Delete chat history for this account
+      const accountIndex = userData.telegramAccounts.findIndex(acc => acc.telegramUserId === telegramUserId);
+      if (accountIndex !== -1) {
+        await userDoc.ref.collection('telegramChats').doc(`account_${accountIndex}`).delete();
+      }
+      
+      res.json({ success: true, message: 'Account disconnected successfully' });
+    } else {
+      res.json({ success: false, message: 'Database not available' });
+    }
+  } catch (error) {
+    console.error('❌ Error disconnecting account:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Webhook endpoint
 app.post(`/bot${TELEGRAM_BOT_TOKEN}`, (req, res) => {
   bot.processUpdate(req.body);
@@ -146,22 +190,32 @@ app.post('/api/check-connection', async (req, res) => {
       const userDoc = await db.collection('users').doc(userId).get();
       
       if (!userDoc.exists) {
-        return res.json({ connected: false });
+        return res.json({ connected: false, accounts: [] });
       }
 
       const userData = userDoc.data();
+      const telegramAccounts = userData.telegramAccounts || [];
+      
       res.json({
         connected: userData.telegramConnected || false,
-        telegramUsername: userData.telegramUsername || '',
-        telegramFirstName: userData.telegramFirstName || ''
+        accounts: telegramAccounts.map(acc => ({
+          telegramUserId: acc.telegramUserId,
+          telegramUsername: acc.telegramUsername,
+          telegramFirstName: acc.telegramFirstName,
+          connectedAt: acc.connectedAt,
+          isPrimary: acc.isPrimary
+        }))
       });
     } else {
       // Check memory storage
       const session = Array.from(userSessions.values()).find(s => s.userId === userId && s.connected);
       res.json({
         connected: !!session,
-        telegramUsername: session?.telegramUsername || '',
-        telegramFirstName: session?.telegramFirstName || ''
+        accounts: session ? [{
+          telegramUsername: session.telegramUsername || '',
+          telegramFirstName: session.telegramFirstName || '',
+          isPrimary: true
+        }] : []
       });
     }
   } catch (error) {
@@ -211,14 +265,47 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
         tokenData = tokenDoc.data();
         appUserId = tokenData.userId;
 
-        // Link Telegram account to app user
-        await db.collection('users').doc(appUserId).set({
-          telegramConnected: true,
+        // Check how many Telegram accounts are already connected
+        const userDoc = await db.collection('users').doc(appUserId).get();
+        const userData = userDoc.data() || {};
+        const telegramAccounts = userData.telegramAccounts || [];
+        
+        // Check if this Telegram user is already connected
+        const existingAccount = telegramAccounts.find(acc => acc.telegramUserId === telegramUserId);
+        
+        if (existingAccount) {
+          await bot.sendMessage(chatId, 
+            `✅ Your Telegram account is already connected to Hesabay!\n\n` +
+            `You can continue chatting with Hesabay AI.`
+          );
+          return;
+        }
+        
+        // Check if limit reached (max 3 accounts)
+        if (telegramAccounts.length >= 3) {
+          await bot.sendMessage(chatId, 
+            `❌ Maximum limit reached!\n\n` +
+            `You can connect up to 3 Telegram accounts.\n` +
+            `Please disconnect one account from the web app before adding a new one.`
+          );
+          return;
+        }
+
+        // Add new Telegram account
+        telegramAccounts.push({
           telegramUserId: telegramUserId,
           telegramChatId: chatId.toString(),
           telegramUsername: msg.from.username || '',
           telegramFirstName: userName,
-          telegramConnectedAt: admin.firestore.FieldValue.serverTimestamp()
+          connectedAt: admin.firestore.FieldValue.serverTimestamp(),
+          isPrimary: telegramAccounts.length === 0 // First account is primary
+        });
+
+        // Update user document
+        await db.collection('users').doc(appUserId).set({
+          telegramConnected: true,
+          telegramAccounts: telegramAccounts,
+          lastConnectedTelegramId: telegramUserId
         }, { merge: true });
 
         // Mark token as used
@@ -285,18 +372,32 @@ bot.onText(/\/help/, async (msg) => {
   const chatId = msg.chat.id;
   
   await bot.sendMessage(chatId,
-    `🤖 Hesabay AI Bot - Help\n\n` +
-    `📱 Commands:\n` +
+    `🤖 *Hesabay AI Bot - Help*\n\n` +
+    `📱 *Available Commands:*\n\n` +
     `/start - Connect your Hesabay account\n` +
-    `/help - Show this help\n` +
-    `/disconnect - Disconnect your account\n\n` +
-    `💬 Just send any message to chat with me!\n\n` +
-    `Made by Baitullah Rohani 💙`
+    `/help - Show this help message\n` +
+    `/stats - View your account statistics\n` +
+    `/clear - Clear your chat history\n` +
+    `/logout - Disconnect and clear all data\n` +
+    `/disconnect - Same as logout\n\n` +
+    `💬 *How to Use:*\n` +
+    `• Just send any message to chat with Hesabay AI\n` +
+    `• Ask questions about Hesabay features\n` +
+    `• Get help in any language (Persian, English, etc.)\n` +
+    `• All chats are saved and synced to the web app\n\n` +
+    `🌟 *Features:*\n` +
+    `✅ AI-powered responses\n` +
+    `✅ Multi-language support\n` +
+    `✅ Chat history saved\n` +
+    `✅ Real-time sync with web app\n` +
+    `✅ 24/7 availability\n\n` +
+    `Made with 💙 by Baitullah Rohani`,
+    { parse_mode: 'Markdown' }
   );
 });
 
-// Handle /disconnect command
-bot.onText(/\/disconnect/, async (msg) => {
+// Handle /disconnect or /logout command
+bot.onText(/\/(disconnect|logout)/, async (msg) => {
   const chatId = msg.chat.id;
   const telegramUserId = msg.from.id.toString();
   
@@ -318,23 +419,76 @@ bot.onText(/\/disconnect/, async (msg) => {
         telegramUserId: admin.firestore.FieldValue.delete(),
         telegramChatId: admin.firestore.FieldValue.delete(),
         telegramUsername: admin.firestore.FieldValue.delete(),
-        telegramFirstName: admin.firestore.FieldValue.delete()
+        telegramFirstName: admin.firestore.FieldValue.delete(),
+        telegramDisconnectedAt: admin.firestore.FieldValue.serverTimestamp()
       });
+      
+      // Clear chat history
+      await userDoc.ref.collection('telegramChats').doc('main').delete();
     } else {
       // Memory storage
       const session = Array.from(userSessions.entries()).find(([_, s]) => s.telegramUserId === telegramUserId);
       if (session) {
         userSessions.delete(session[0]);
+        chatHistories.delete(session[0]);
       }
     }
 
     await bot.sendMessage(chatId, 
-      `✅ Disconnected from Hesabay.\n\n` +
-      `You can reconnect anytime from the Hesabay app.`
+      `✅ Successfully logged out from Hesabay!\n\n` +
+      `Your account has been disconnected and chat history cleared.\n\n` +
+      `You can reconnect anytime from the Hesabay app Settings.\n\n` +
+      `Thank you for using Hesabay AI! 💙`
     );
+    
+    console.log(`✅ User ${telegramUserId} logged out`);
   } catch (error) {
     console.error('❌ Error disconnecting:', error);
-    await bot.sendMessage(chatId, `❌ Error disconnecting. Please try again.`);
+    await bot.sendMessage(chatId, `❌ Error logging out. Please try again.`);
+  }
+});
+
+// Handle /stats command
+bot.onText(/\/stats/, async (msg) => {
+  const chatId = msg.chat.id;
+  const telegramUserId = msg.from.id.toString();
+  
+  try {
+    if (db) {
+      const usersSnapshot = await db.collection('users')
+        .where('telegramUserId', '==', telegramUserId)
+        .limit(1)
+        .get();
+
+      if (usersSnapshot.empty) {
+        await bot.sendMessage(chatId, `⚠️ Please connect your account first using /start`);
+        return;
+      }
+
+      const userDoc = usersSnapshot.docs[0];
+      const userData = userDoc.data();
+      
+      // Get chat history
+      const chatDoc = await userDoc.ref.collection('telegramChats').doc('main').get();
+      const messageCount = chatDoc.exists ? (chatDoc.data().messages || []).length : 0;
+      
+      const connectedDate = userData.telegramConnectedAt ? 
+        new Date(userData.telegramConnectedAt.toMillis()).toLocaleDateString() : 'Unknown';
+      
+      await bot.sendMessage(chatId,
+        `📊 *Your Hesabay Stats*\n\n` +
+        `👤 Name: ${userData.telegramFirstName || 'User'}\n` +
+        `📱 Username: @${userData.telegramUsername || 'N/A'}\n` +
+        `📅 Connected: ${connectedDate}\n` +
+        `💬 Total Messages: ${messageCount}\n` +
+        `✅ Status: Connected\n\n` +
+        `Keep chatting with Hesabay AI! 🤖`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+  } catch (error) {
+    console.error('❌ Error getting stats:', error);
+    await bot.sendMessage(chatId, `❌ Error getting stats. Please try again.`);
   }
 });
 
@@ -403,14 +557,28 @@ bot.on('message', async (msg) => {
     // Check if user is connected
     let appUserId;
     let chatHistory = [];
+    let accountIndex = 0;
 
     if (db) {
+      // Find user by checking telegramAccounts array
       const usersSnapshot = await db.collection('users')
-        .where('telegramUserId', '==', telegramUserId)
-        .limit(1)
+        .where('telegramConnected', '==', true)
         .get();
 
-      if (usersSnapshot.empty) {
+      let foundUser = null;
+      for (const doc of usersSnapshot.docs) {
+        const userData = doc.data();
+        const telegramAccounts = userData.telegramAccounts || [];
+        const accountIdx = telegramAccounts.findIndex(acc => acc.telegramUserId === telegramUserId);
+        
+        if (accountIdx !== -1) {
+          foundUser = doc;
+          accountIndex = accountIdx;
+          break;
+        }
+      }
+
+      if (!foundUser) {
         await bot.sendMessage(chatId, 
           `⚠️ Please connect your Hesabay account first!\n\n` +
           `Use /start with a connection token from the Hesabay app.`
@@ -418,10 +586,10 @@ bot.on('message', async (msg) => {
         return;
       }
 
-      appUserId = usersSnapshot.docs[0].id;
+      appUserId = foundUser.id;
 
-      // Get chat history from Firebase
-      const chatRef = db.collection('users').doc(appUserId).collection('telegramChats').doc('main');
+      // Get chat history from Firebase (separate for each account)
+      const chatRef = db.collection('users').doc(appUserId).collection('telegramChats').doc(`account_${accountIndex}`);
       const chatDoc = await chatRef.get();
       
       if (chatDoc.exists) {
@@ -460,14 +628,16 @@ bot.on('message', async (msg) => {
 
     // Save to Firebase or memory
     if (db) {
-      const chatRef = db.collection('users').doc(appUserId).collection('telegramChats').doc('main');
+      const chatRef = db.collection('users').doc(appUserId).collection('telegramChats').doc(`account_${accountIndex}`);
       await chatRef.set({
         messages: chatHistory.slice(-20), // Keep last 20 messages
         lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
-        lastMessage: aiResponse
+        lastMessage: aiResponse,
+        telegramUserId: telegramUserId,
+        accountIndex: accountIndex
       }, { merge: true });
     } else {
-      chatHistories.set(appUserId, chatHistory.slice(-20));
+      chatHistories.set(appUserId + '_' + accountIndex, chatHistory.slice(-20));
     }
 
     // Send response
